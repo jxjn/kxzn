@@ -1,0 +1,5 @@
+{
+  "name": "开心指南",
+  "description": "基于 Cloudflare Worker 的全自动 ProxyIP 扫描、测速及监控仪表盘系统。",
+  "requestFramePermissions": []
+}
