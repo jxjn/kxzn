@@ -29,25 +29,9 @@ function isCloudflareIP(ip) {
   return false;
 }
 
-const pool = async (items, task, limit = 10) => {
-  const results = [];
-  const executing = [];
-  for (const item of items) {
-    const p = task(item).then(res => {
-      executing.splice(executing.indexOf(p), 1);
-      return res;
-    });
-    executing.push(p);
-    results.push(p);
-    if (executing.length >= limit) await Promise.race(executing);
-  }
-  return Promise.all(results);
-};
-
 export default {
   async scheduled(event, env, ctx) {
-    // Note: Cron scheduled updates are disabled because batch limits make it unreliable
-    // in a single worker invocation. Updates must be triggered via the UI.
+    ctx.waitUntil(this.updateIPs(env));
   },
 
   async fetch(request, env, ctx) {
@@ -100,120 +84,20 @@ export default {
       return new Response(JSON.stringify({ success: true }));
     }
 
-    if (url.pathname === '/api/settings_json') {
-      return new Response(JSON.stringify(await this.getSettings(env)), { headers: { 'Content-Type': 'application/json' }});
-    }
-
-    if (url.pathname === '/api/do_dns_batch' && request.method === 'POST') {
-      const batch = await request.json();
-      const ips = [];
-      await pool(batch, async (req) => {
-        try {
-          const res = await fetch(req.url, { headers: { 'Accept': 'application/dns-json' } });
-          const data = await res.json();
-          if (data.Answer) {
-            data.Answer.forEach(r => {
-              if (r.type === 1) ips.push({ ip: r.data, isProxy: req.isProxyDomain });
-            });
-          }
-        } catch(e) {}
-      }, 10);
-      return new Response(JSON.stringify({ ips }), { headers: {'Content-Type': 'application/json'}});
-    }
-
-    if (url.pathname === '/api/do_tcp_batch' && request.method === 'POST') {
-      const batch = await request.json();
-      const chunkResults = await pool(batch, async (item) => {
-        const { ip, isProxy } = item;
-        const start = Date.now();
-        let latency = -1;
-        let isValid = false;
-        let socket = null;
-        try {
-          socket = connect({ hostname: ip, port: 443 });
-          
-          await Promise.race([
-            socket.opened.catch(() => null),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))
-          ]);
-          
-          const writer = socket.writable.getWriter();
-          const reader = socket.readable.getReader();
-          
-          // TLS Client Hello (matches cfcpi)
-          const hexStr = '16030107a30100079f0303af1f4d78be2002cf63e8c727224cf1ee4a8ac89a0ad04bc54cbed5cd7c830880203d8326ae1d1d076ec749df65de6d21dec7371c589056c0a548e31624e121001e0020baba130113021303c02bc02fc02cc030cca9cca8c013c014009c009d002f0035010007361a1a0000000a000c000acaca11ec001d00170018fe0d00ba0000010001fc00206a2fb0535a0a5e565c8a61dcb381bab5636f1502bbd09fe491c66a2d175095370090dd4d770fc5e14f4a0e13cfd919a532d04c62eb4a53f67b1375bf237538cea180470d942bdde74611afe80d70ad25afb1d5f02b2b4eed784bc2420c759a742885f6ca982b25d0fdd7d8f618b7f7bc10172f61d446d8f8a6766f3587abbae805b8ef40fcb819194ac49e91c6c3762775f8dc269b82a21ddccc9f6f43be62323147b411475e47ea2c4efe52ef2cef5c7b32000d00120010040308040401050308050501080606010010000e000c02683208687474702f312e31000b0002010000050005010000000044cd00050003026832001b00030200020017000000230000002d000201010012000000000010000e00000b636861746770742e636f6dff01000100002b0007061a1a03040303003304ef04edcaca00010011ec04c05eac5510812e46c13826d28279b13ce62b6464e01ae1bb6d49640e57fb3191c656c4b0167c246930699d4f467c19d60dacaa86933a49e5c97390c3249db33c1aa59f47205701419461569cb01a22b4378f5f3bb21d952700f250a6156841f2cc952c75517a481112653400913f9ab58982a3f2d0010aba5ae99a2d69f6617a4220cd616de58ccbf5d10c5c68150152b60e2797521573b10413cb7a3aab25409d426a5b64a9f3134e01dc0dd0fc1a650c7aafec00ca4b4dddb64c402252c1c69ca347bb7e49b52b214a7768657a808419173bcbea8aa5a8721f17c82bc6636189b9ee7921faa76103695a638585fe678bcbb8725831900f808863a74c52a1b2caf61f1dec4a9016261c96720c221f45546ce0e93af3276dd090572db778a865a07189ae4f1a64c6dbaa25a5b71316025bd13a6012994257929d199a7d90a59285c75bd4727a8c93484465d62379cd110170073aad2a3fd947087634574315c09a7ccb60c301d59a7c37a330253a994a6857b8556ce0ac3cda4c6fe3855502f344c0c8160313a3732bce289b6bda207301e7b318277331578f370ccbcd3730890b552373afeb162c0cb59790f79559123b2d437308061608a704626233d9f73d18826e27f1c00157b792460eda9b35d48b4515a17c6125bdb96b114503c99e7043b112a398888318b956a012797c8a039a51147b8a58071793c14a3611fb0424e865f48a61cac7c43088c634161cea089921d229e1a370effc5eff2215197541394854a201a6ebf74942226573bb95710454bd27a52d444690837d04611b676269873c50c3406a79077e6606478a841f96f7b076a2230fd34f3eea301b77bf00750c28357a9df5b04f192b9c0bbf4f71891f1842482856b021280143ae74356c5e6a8e3273893086a90daa7a92426d8c370a45e3906994b8fa7a57d66b503745521e40948e83641de2a751b4a836da54f2da413074c3d856c954250b5c8332f1761e616437e527c0840bc57d522529b9259ccac34d7a3888f0aade0a66c392458cc1a698443052413217d29fbb9a1124797638d76100f82807934d58f30fcff33197fc171cfa3b0daa7f729591b1d7389ad476fde2328af74effd946265b3b81fa33066923db476f71babac30b590e05a7ba2b22f86925abca7ef8058c2481278dd9a240c8816bba6b5e6603e30670dffa7e6e3b995b0b18ec404614198a43a07897d84b439878d179c7d6895ac3f42ecb7998d4491060d2b8a5316110830c3f20a3d9a488a85976545917124c1eb6eb7314ea9696712b7bcab1cfd2b66e5a85106b2f651ab4b8a145e18ac41f39a394da9f327c5c92d4a297a0c94d1b8dcc3b111a700ac8d81c45f983ca029fd2887ad4113c7a23badf807c6d0068b4fa7148402aae15cc55971b57669a4840a22301caaec392a6ea6d46dab63890594d41545ebc2267297e3f4146073814bb3239b3e566684293b9732894193e71f3b388228641bb8be6f5847abb9072d269cb40b353b6aa3259ccb7e438d6a37ffa8cc1b7e4911575c41501321769900d19792aa3cfbe58b0aaf91c91d3b63900697279ad6c1aa44897a07d937e0d5826c24439420ca5d8a63630655ce9161e58d286fc885fcd9b19d096080225d16c89939a24aa1e98632d497b5604073b13f65bdfddc1de4b40d2a829b0521010c5f0f241b1ccc759049579db79983434fac2748829b33f001d0020a8e86c9d3958e0257c867e59c8082238a1ea0a9f2cac9e41f9b3cb0294f34b484a4a000100002900eb00c600c0afc8dade37ae62fa550c8aa50660d8e73585636748040b8e01d67161878276b1ec1ee2aff7614889bb6a36d2bdf9ca097ff6d7bf05c4de1d65c2b8db641f1c8dfbd59c9f7e0fed0b8e0394567eda55173d198e9ca40883b291ab4cada1a91ca8306ca1c37e047ebfe12b95164219b06a24711c2182f5e37374d43c668d45a3ca05eda90e90e510e628b4cfa7ae880502dae9a70a8eced26ad4b3c2f05d77f136cfaa622e40eb084dd3eb52e23a9aeff6ae9018100af38acfd1f6ce5d8c53c4a61c547258002120fe93e5c7a5c9c1a04bf06858c4dd52b01875844e15582dd566d03f41133183a0';
-          const arr = new Uint8Array(hexStr.length / 2);
-          for (let i = 0; i < hexStr.length; i += 2) arr[i / 2] = parseInt(hexStr.substring(i, i + 2), 16);
-          writer.write(arr).catch(() => null);
-          
-          const res = await Promise.race([
-            reader.read().catch(() => null),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))
-          ]);
-          
-          if (res && res.value && res.value[0] === 0x16) {
-             latency = Date.now() - start;
-             isValid = true;
-          }
-        } catch (e) {
-        } finally {
-          try { if (socket) socket.close(); } catch(e) {}
-        }
-        
-        if (!isValid) return null;
-
-        let info = { country_code: '未知', organization: '', organization_name: '' };
-        try {
-          const infoRes = await fetch(\`https://get.geojs.io/v1/ip/geo/\${ip}.json\`);
-          if (infoRes.ok) info = await infoRes.json() || info;
-        } catch (e) {}
-
-        const org = info.organization_name || '';
-        const isp = info.organization || '';
-        const combined = \`\${org} \${isp}\`.toLowerCase();
-        let provider = '未知服务商';
-        if (combined.includes('amazon') || combined.includes('aws')) provider = 'AWS';
-        else if (combined.includes('google') || combined.includes('gcp')) provider = 'GCP';
-        else if (combined.includes('linode') || combined.includes('akamai')) provider = 'Linode';
-        else if (combined.includes('digitalocean') || combined.includes('digital ocean') || combined.includes('do')) provider = 'DigitalOcean';
-        else if (combined.includes('microsoft') || combined.includes('azure')) provider = 'Azure';
-        else if (combined.includes('vultr')) provider = 'Vultr';
-        else if (combined.includes('cloudflare')) provider = 'Cloudflare';
-        else if (isProxy) provider = '其他节点';
-
-        // Keep it compliant with subrequest limits: we use 1 max connection here and max 1 fetch, so 2 subrequests per item.
-        return { 
-          ip, 
-          country: info.country_code, 
-          provider, 
-          latency, 
-          isProxy, 
-          updateAt: new Date().toISOString() 
-        };
-      }, 5);
-
-      return new Response(JSON.stringify({ results: chunkResults.filter(r => r !== null) }), { headers: {'Content-Type': 'application/json'}});
-    }
-
-    if (url.pathname === '/api/save_results' && request.method === 'POST') {
-      const batchResults = await request.json();
-      
-      const uniqueMap = new Map();
-      batchResults.forEach(item => {
-        uniqueMap.set(item.ip, item);
-      });
-  
-      const finalResults = Array.from(uniqueMap.values()).sort((a, b) => {
-        const aOctets = a.ip.split('.').map(Number);
-        const bOctets = b.ip.split('.').map(Number);
-        for (let i = 0; i < 4; i++) {
-          if (aOctets[i] !== bOctets[i]) return aOctets[i] - bOctets[i];
-        }
-        return 0;
-      });
-  
-      await env.PROXY_IP_KV.put('latest_ips_json', JSON.stringify(finalResults));
+    if (url.pathname === '/api/update') {
+      await env.PROXY_IP_KV.put('update_progress', JSON.stringify({ status: 'starting' }));
+      ctx.waitUntil(this.updateIPs(env));
       return new Response(JSON.stringify({ success: true }));
+    }
+
+    if (url.pathname === '/api/progress') {
+      const data = await env.PROXY_IP_KV.get('update_progress');
+      return new Response(data || '{"status":"idle"}', { 
+        headers: { 
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache, no-store, must-revalidate'
+        } 
+      });
     }
 
     if (url.pathname === '/api/logout') {
@@ -278,38 +162,37 @@ export default {
       return Promise.all(results);
     };
 
-    // 1. Parallel DNS Resolution (10 threads)
+    // 1. Parallel DNS Resolution (15 threads)
     let ipMap = new Map(); // ip -> isProxy
     
     // Multiple DoH endpoints and EDNS subnets (to discover IPs from different regions)
     const dnsRequests = [];
-    const subnets = [
-      '', // default
-      '9.9.9.0/24', // US / Global
-      '8.8.8.0/24', // US
-      '1.1.1.0/24', // Global / AU
-      '114.114.114.0/24', // CN
-      '118.250.0.0/24', // CN
-      '168.126.63.0/24', // KR
-      '76.76.2.0/24', // EU/US
-      '185.228.168.0/24', // EU
+    const DoH = [
+      'https://dns.google/resolve',
+      'https://cloudflare-dns.com/dns-query',
+      'https://doh.pub/dns-query',
+      'https://dns.alidns.com/resolve',
+      'https://1.1.1.1/dns-query'
     ];
+    const subnets = ['', '1.1.1.0/24', '8.8.8.0/24', '114.114.114.0/24', '168.126.63.0/24', '202.14.67.0/24'];
     
     for (const domain of domains) {
-      const isProxyDomain = domain.toLowerCase().includes('proxyip');
-      // Mix of Google DNS (supports edns_client_subnet) and Cloudflare DNS
-      for (const subnet of subnets) {
-        dnsRequests.push({
-          url: subnet ? \`https://dns.google/resolve?name=\${domain.trim()}&type=A&edns_client_subnet=\${subnet}\` : \`https://dns.google/resolve?name=\${domain.trim()}&type=A\`,
-          domain,
-          isProxyDomain
-        });
-        // We also add another query with a random cache buster (it might ignore it but it's worth a try)
-        dnsRequests.push({
-          url: \`https://dns.google/resolve?name=\${domain.trim()}&type=A&random_padding=\${Math.random()}\`,
-          domain,
-          isProxyDomain
-        });
+      if (!domain.trim()) continue;
+      const isProxyDomain = domain.toLowerCase().includes('proxyip') || domain.toLowerCase().includes('cmliussss');
+      for (const endpoint of DoH) {
+        const isGoogle = endpoint.includes('dns.google');
+        for (const subnet of subnets) {
+          if (subnet && !isGoogle) continue; 
+          const url = isGoogle 
+            ? \`\${endpoint}?name=\${domain.trim()}&type=A&edns_client_subnet=\${subnet}\`
+            : \`\${endpoint}?name=\${domain.trim()}&type=A\`;
+          
+          dnsRequests.push({ url, isProxyDomain });
+        }
+        // Random padding for google
+        if (isGoogle) {
+          dnsRequests.push({ url: \`\${endpoint}?name=\${domain.trim()}&type=A&random_padding=\${Math.random()}\`, isProxyDomain });
+        }
       }
     }
 
@@ -318,7 +201,7 @@ export default {
 
     await pool(dnsRequests, async (req) => {
       try {
-        const res = await fetch(req.url, { headers: { 'Accept': 'application/dns-json' } });
+        const res = await fetch(req.url, { headers: { 'Accept': 'application/dns-json' }, signal: AbortSignal.timeout(5000) });
         const data = await res.json();
         if (data.Answer) {
           data.Answer.forEach(r => {
@@ -331,7 +214,7 @@ export default {
       } catch (e) {}
       progress.dnsResolved++;
       saveProgress();
-    }, 10);
+    }, 20);
 
     const ipArray = Array.from(ipMap.keys());
     progress.ipTotal = ipArray.length;
@@ -390,35 +273,87 @@ export default {
 
         let info = null;
         try {
-          const infoRes = await fetch(\`https://get.geojs.io/v1/ip/geo/\${ip}.json\`);
+          const infoRes = await fetch(\`https://get.geojs.io/v1/ip/geo/\${ip}.json\`, { signal: AbortSignal.timeout(3000) });
           if (infoRes.ok) info = await infoRes.json();
-        } catch (e) {}
-
-        if (!info) {
-          info = { country_code: '未知', organization: '', organization_name: '' };
+          else {
+            const fbRes = await fetch(\`http://ip-api.com/json/\${ip}\`, { signal: AbortSignal.timeout(3000) });
+            if (fbRes.ok) info = await fbRes.json();
+          }
+        } catch (e) {
+          try {
+            const fbRes = await fetch(\`http://ip-api.com/json/\${ip}\`, { signal: AbortSignal.timeout(3000) });
+            if (fbRes.ok) info = await fbRes.json();
+          } catch(e2) {}
         }
 
-        const org = info.organization_name || '';
-        const isp = info.organization || '';
-        const combined = \`\${org} \${isp}\`.toLowerCase();
+        if (!info) {
+          info = { country_code: '未知', organization: '', organization_name: '' };        const org = (info.organization_name || info.as || info.asn || '').toLowerCase();
+        const isp = (info.organization || info.isp || '').toLowerCase();
+        const combined = `${org} ${isp}`;
         let provider = '未知服务商';
         const isProxy = ipMap.get(ip) || false;
         
-        const mapping = { 'HK': '香港', 'SG': '新加坡', 'JP': '日本', 'US': '美国', 'NL': '荷兰', 'DE': '德国', 'MY': '马来西亚', 'KR': '韩国', 'TW': '台湾', 'GB': '英国', 'FR': '法国', 'CA': '加拿大', 'IN': '印度', 'AU': '澳大利亚' };
-        const countryName = mapping[info.country_code] || info.country_code || '未知';
+        const mapping = { 
+          'HK': '香港', 'SG': '新加坡', 'JP': '日本', 'US': '美国', 'NL': '荷兰', 'DE': '德国', 
+          'MY': '马来西亚', 'KR': '韩国', 'TW': '台湾', 'GB': '英国', 'FR': '法国', 'CA': '加拿大', 
+          'IN': '印度', 'AU': '澳大利亚', 'TH': '泰国', 'PH': '菲律宾', 'VN': '越南', 'ID': '印尼',
+          'BR': '巴西', 'RU': '俄罗斯', 'IT': '意大利', 'ES': '西班牙', 'AE': '阿联酋', 'TR': '土耳其',
+          'MO': '澳门', 'CH': '瑞士', 'SE': '瑞典', 'NO': '挪威', 'FI': '�        // --- 核心厂商筛选逻辑 ---
+        if (combined.includes('alibaba') || combined.includes('alipay') || combined.includes('as37963') || combined.includes('as45102')) provider = '阿里云';
+        else if (combined.includes('tencent') || combined.includes('as132203')) provider = '腾讯云';
+        else if (combined.includes('huawei') || combined.includes('as136907')) provider = '华为云';
+        else if (combined.includes('amazon') || combined.includes('aws') || combined.includes('as16509') || combined.includes('as14618')) provider = 'AWS';
+        else if (combined.includes('google') || combined.includes('gcp') || combined.includes('as15169')) provider = '谷歌云';
+        else if (combined.includes('oracle') || combined.includes('as31898')) provider = 'Oracle';
+        else if (combined.includes('linode') || combined.includes('akamai') || combined.includes('as15830')) provider = 'Linode/Akamai';
+        else if (combined.includes('digitalocean') || combined.includes('as14061')) provider = 'DigitalOcean';
+        else if (combined.includes('microsoft') || combined.includes('azure') || combined.includes('as8075')) provider = 'Azure';
+        else if (combined.includes('vultr') || combined.includes('choopa') || combined.includes('as20473')) provider = 'Vultr';
 
-        if (combined.includes('alibaba') || combined.includes('alipay')) provider = '阿里云';
-        else if (combined.includes('tencent')) provider = '腾讯云';
-        else if (combined.includes('huawei')) provider = '华为云';
-        else if (combined.includes('amazon') || combined.includes('aws')) provider = 'AWS';
-        else if (combined.includes('google') || combined.includes('gcp')) provider = '谷歌云';
-        else if (combined.includes('oracle')) provider = 'Oracle';
-        else if (combined.includes('linode') || combined.includes('akamai')) provider = 'Linode';
-        else if (combined.includes('digitalocean') || combined.includes('digital ocean') || combined.includes('do')) provider = 'DigitalOcean';
-        else if (combined.includes('microsoft') || combined.includes('azure')) provider = 'Azure';
-        else if (combined.includes('vultr')) provider = 'Vultr';
-        else if (combined.includes('cloudflare')) provider = 'Cloudflare';
-        else if (isProxy) provider = '其他节点';
+        // --- 严格过滤：非知名厂商 IP 直接丢弃 ---
+        if (provider === '未知服务商') return updateProgress(null);
+
+        // --- 反代有效性检测 & 归属地修正 ---
+        let proxyValid = false;
+        try {
+          const trace = await fetch(`http://${ip}/cdn-cgi/trace`, { 
+             headers: { 'Host': 'www.cloudflare.com' },
+             signal: AbortSignal.timeout(1500) 
+          }).then(r => r.text());
+          
+          if (trace.includes('colo=')) {
+            proxyValid = true;
+            const coloMatch = trace.match(/colo=([A-Z]{3})/);
+            if (coloMatch) {
+              const coloMap = {
+                'HKG': '香港', 'SIN': '新加坡', 'NRT': '日本', 'HND': '日本', 'KIX': '日本',
+                'SJC': '美国', 'LAX': '美国', 'SEA': '美国', 'EWR': '美国', 'FRA': '德国',
+                'LHR': '英国', 'ICN': '韩国', 'TPE': '台湾', 'BKK': '泰国', 'MNL': '菲律宾',
+                'KUL': '马来西亚', 'SNA': '美国', 'ORD': '美国', 'DFW': '美国', 'IAD': '美国',
+                'AMS': '荷兰', 'CDG': '法国', 'SYD': '澳大利亚', 'MEL': '澳大利亚', 'BOM': '印度', 'DEL': '印度'
+              };
+              if (coloMap[coloMatch[1]]) countryName = coloMap[coloMatch[1]];
+            }
+          }
+        } catch(e) {}
+
+        // 如果开启了严格的反代验证，则丢弃失败的节点。这里为了稳定性暂时保留厂商节点，但在 UI 标记。
+        return updateProgress({ 
+          ip, 
+          country: countryName, 
+          provider: provider + (proxyValid ? "" : " (无效反代)"), 
+          latency, 
+          isProxy: proxyValid, 
+          updateAt: new Date().toISOString() 
+        });
+      }, 15);
+
+      batchResults.push(...chunkResults.filter(r => r !== null));��利亚', 'BOM': '印度', 'DEL': '印度'
+               };
+               if (coloMap[colo]) countryName = coloMap[colo];
+             }
+           } catch(e) {}
+        }
 
         return updateProgress({ 
           ip, 
@@ -428,25 +363,20 @@ export default {
           isProxy, 
           updateAt: new Date().toISOString() 
         });
-      }, 4);
+      }, 15);
 
       batchResults.push(...chunkResults.filter(r => r !== null));
 
-    // IP Cleaning: Deduplicate and Sort by IP address
+    // IP Cleaning: Deduplicate
     const uniqueMap = new Map();
     batchResults.forEach(item => {
-      // Use IP as key to ensure uniqueness
       uniqueMap.set(item.ip, item);
     });
 
-    const finalResults = Array.from(uniqueMap.values()).sort((a, b) => {
-      const aOctets = a.ip.split('.').map(Number);
-      const bOctets = b.ip.split('.').map(Number);
-      for (let i = 0; i < 4; i++) {
-        if (aOctets[i] !== bOctets[i]) return aOctets[i] - bOctets[i];
-      }
-      return 0;
-    });
+    const finalResults = Array.from(uniqueMap.values())
+      .filter(r => r.latency < 380) // 丢弃延迟大于 380ms 的
+      .sort((a, b) => a.latency - b.latency) // 按延迟从小到大排序
+      .slice(0, 30); // 仅保留前 30 个
 
     progress.status = 'saving';
     await saveProgress(true);
@@ -513,9 +443,7 @@ export default {
           <div class="bg-gray-900/50 p-4 rounded-xl border border-gray-800">
             <label class="block text-[10px] text-gray-500 mb-1 font-bold">厂商筛选</label>
             <select id="providerF" onchange="render()" class="w-full bg-gray-900 text-white border-none p-0 text-sm focus:ring-0 outline-none">
-              <option value="">全部</option><option value="阿里云">阿里云</option><option value="华为云">华为云</option>
-              <option value="谷歌云">谷歌云</option><option value="Oracle">Oracle</option><option value="Linode">Linode</option>
-              <option value="DigitalOcean">DigitalOcean</option><option value="通用节点">通用节点</option>
+              <option value="">加载中...</option>
             </select>
           </div>
           <div class="bg-gray-900/50 p-4 rounded-xl border border-gray-800">
@@ -545,8 +473,13 @@ export default {
         async function load() {
           raw = await fetch('/api/ips').then(r => r.json());
           set = await fetch('/api/settings').then(r => r.json());
+          
           const countries = [...new Set(raw.map(i => i.country))].sort();
-          countryF.innerHTML = '<option value="">全部</option>' + countries.map(c => \\\`<option value="\\\${c}">\\\${c}</option>\\\`).join('');
+          countryF.innerHTML = '<option value="">全部国家</option>' + countries.map(c => \\\`<option value="\\\${c}">\\\${c}</option>\\\`).join('');
+          
+          const providers = [...new Set(raw.map(i => i.provider))].sort();
+          providerF.innerHTML = '<option value="">全部厂商</option>' + providers.map(p => \\\`<option value="\\\${p}">\\\${p}</option>\\\`).join('');
+          
           render();
         }
         function render() {
@@ -575,73 +508,38 @@ export default {
         async function runUpdate(btn) {
           const og = btn.innerText;
           btn.disabled = true; 
-          btn.innerText = '正在生成扫描计划...';
+          btn.innerText = '正在启动测速...';
+          
           try {
-            const settings = await fetch('/api/settings').then(r => r.json());
-            const domains = settings.domains || [];
+            await fetch('/api/update');
+            let checks = 0;
             
-            const subnets = ['', '9.9.9.0/24', '8.8.8.0/24', '1.1.1.0/24', '114.114.114.0/24', '118.250.0.0/24', '168.126.63.0/24', '76.76.2.0/24', '185.228.168.0/24'];
-            const dnsRequests = [];
-            for (const domain of domains) {
-              const d = domain.trim();
-              if(!d) continue;
-              const isProxyDomain = d.toLowerCase().includes('proxyip');
-              for (const subnet of subnets) {
-                dnsRequests.push({ url: subnet ? \`https://dns.google/resolve?name=\${d}&type=A&edns_client_subnet=\${subnet}\` : \`https://dns.google/resolve?name=\${d}&type=A\`, domain: d, isProxyDomain });
-                dnsRequests.push({ url: \`https://dns.google/resolve?name=\${d}&type=A&random_padding=\${Math.random()}\`, domain: d, isProxyDomain });
-              }
-            }
-            
-            let ipMap = new Map();
-            let dnsResolved = 0;
-            
-            const dnsBatchSize = 40;
-            for (let i = 0; i < dnsRequests.length; i += dnsBatchSize) {
-              const batch = dnsRequests.slice(i, i + dnsBatchSize);
-              btn.innerText = \`正在解析 DNS... (\${dnsResolved}/\${dnsRequests.length})\`;
-              
-              const res = await fetch('/api/do_dns_batch', {
-                method: 'POST', body: JSON.stringify(batch), headers: {'Content-Type': 'application/json'}
-              }).then(r => r.json());
-              
-              if (res.ips) {
-                res.ips.forEach(item => {
-                  const current = ipMap.get(item.ip) || false;
-                  ipMap.set(item.ip, current || item.isProxy);
-                });
-              }
-              dnsResolved += batch.length;
-            }
-            
-            const ipArray = Array.from(ipMap.entries()).map(e => ({ ip: e[0], isProxy: e[1] }));
-            let ipTested = 0;
-            let ipValid = 0;
-            const batchResults = [];
-            
-            const tcpBatchSize = 10;
-            for (let i = 0; i < ipArray.length; i += tcpBatchSize) {
-              const batch = ipArray.slice(i, i + tcpBatchSize);
-              btn.innerText = \`正在进行 TCP 测速: \${Math.floor(ipTested / ipArray.length * 100)}% (\${ipTested}/\${ipArray.length})\`;
+            const it = setInterval(async () => {
               try {
-                const res = await fetch('/api/do_tcp_batch', {
-                  method: 'POST', body: JSON.stringify(batch), headers: {'Content-Type': 'application/json'}
-                }).then(r => r.json());
+                const p = await fetch('/api/progress').then(r => r.json());
                 
-                if (res.results) {
-                   batchResults.push(...res.results);
-                   ipValid += res.results.length;
+                if (p.status === 'starting' || p.status === 'dns') {
+                  btn.innerText = '正在解析 DNS... (' + (p.dnsResolved || 0) + '/' + (p.dnsRequests || 0) + ')';
+                } else if (p.status === 'test') {
+                  const pct = p.ipTotal ? Math.floor((p.ipTested || 0) / p.ipTotal * 100) : 0;
+                  btn.innerText = '正在进行 TCP 测速: ' + pct + '% (' + (p.ipTested || 0) + '/' + (p.ipTotal || 0) + ')';
+                } else if (p.status === 'saving') {
+                  btn.innerText = '保存结果中...';
+                } else if (p.status === 'completed') {
+                  clearInterval(it);
+                  btn.innerText = '测速完成！';
+                  location.reload(); // 立即刷新页面
+                  return;
+                }
+                
+                if(++checks > 300) { 
+                  clearInterval(it); 
+                  btn.disabled = false;
+                  btn.innerText = og; 
+                  alert('后台测速超时，请稍后手动刷新页面查看最新结果'); 
                 }
               } catch(e) {}
-              ipTested += batch.length;
-            }
-            
-            btn.innerText = '正在保存结果... (有效IP: ' + ipValid + ')';
-            await fetch('/api/save_results', {
-              method: 'POST', body: JSON.stringify(batchResults), headers: {'Content-Type': 'application/json'}
-            });
-            
-            btn.innerText = '测速完成！';
-            location.reload();
+            }, 1000);
           } catch(e) {
             btn.disabled = false;
             btn.innerText = og;

@@ -1,4 +1,0 @@
-name = "kxzn-worker"
-main = "src/index.ts"         # 按实际入口文件调整
-account_id = "1f58bfb9330fdf35199b8ccf446e0548"
-compatibility_date = "2026-04-24"
